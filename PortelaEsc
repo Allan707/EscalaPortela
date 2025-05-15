@@ -1,0 +1,431 @@
+import streamlit as st
+import pandas as pd
+from datetime import datetime, timedelta
+
+# ========== CONSTANTS ==========
+
+WEEK_DAYS_EN = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+WEEK_DAYS_PT = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
+
+SHIFT_TIMES = {
+    "Morning": "09:00 - 18:00",
+    "Opening": "09:00 - 15:00",
+    "Closing": "12:00 - 18:00",
+    "Off": "Off",
+}
+
+NOTE_COLORS = {
+    "Urgent": "red",
+    "Follow-up": "orange",
+    "Info": "blue",
+    "Completed": "green",
+}
+
+# Multi-language dictionary for UI texts
+LANG = {
+    "en": {
+        "title": "Professional Weekly Shift Scheduler",
+        "select_lang": "Select Language / Selecionar Idioma",
+        "week_start": "Select Week Start Date (Monday only)",
+        "employees": "Employees",
+        "employee_prefs": "Employee Preferences",
+        "consecutive_off": "Consecutive Days Off (0-2)",
+        "specific_days_off": "Specific Days Off",
+        "preferred_shifts": "Preferred Shifts per Day",
+        "add_note": "Add Note",
+        "notes": "Notes",
+        "generate_schedule": "Generate Schedule",
+        "schedule": "Weekly Shift Schedule",
+        "download_csv": "Download Schedule CSV",
+        "coverage_rules": "Coverage Rules (Min employees per shift)",
+        "coverage_report": "Coverage Report",
+        "pending_tasks": "Pending Tasks",
+        "shift_coverage_ok": "Shift coverage OK",
+        "shift_coverage_low": "Low coverage!",
+        "off": "Off",
+        "no_notes": "No notes",
+        "shift_times": "Shift Times",
+        "color_legend": "Notes Color Legend",
+        "help": "Help & Info",
+        "click_name_to_add_note": "Click an employee's name below to add notes or view tasks.",
+        "invalid_week_start": "Please select a Monday as the week start date.",
+        "assign_rule": "Assign Rule to Employee",
+        "two_consecutive_days_off": "Two Consecutive Days Off",
+        "separated_days_off": "Separated Days Off",
+        "coverage_suggestion": "Smart Coverage Suggestion",
+        "pending": "Pending",
+    },
+    "pt": {
+        "title": "Escala Semanal Profissional de Turnos",
+        "select_lang": "Selecionar Idioma / Select Language",
+        "week_start": "Selecionar Data de Início da Semana (Somente segunda-feira)",
+        "employees": "Funcionários",
+        "employee_prefs": "Preferências do Funcionário",
+        "consecutive_off": "Dias Consecutivos de Folga (0-2)",
+        "specific_days_off": "Dias Específicos de Folga",
+        "preferred_shifts": "Turnos Preferidos por Dia",
+        "add_note": "Adicionar Nota",
+        "notes": "Notas",
+        "generate_schedule": "Gerar Escala",
+        "schedule": "Escala Semanal de Turnos",
+        "download_csv": "Baixar Escala CSV",
+        "coverage_rules": "Regras de Cobertura (Mínimo de funcionários por turno)",
+        "coverage_report": "Relatório de Cobertura",
+        "pending_tasks": "Tarefas Pendentes",
+        "shift_coverage_ok": "Cobertura OK",
+        "shift_coverage_low": "Cobertura Baixa!",
+        "off": "Folga",
+        "no_notes": "Sem notas",
+        "shift_times": "Horários dos Turnos",
+        "color_legend": "Legenda de Cores das Notas",
+        "help": "Ajuda & Informações",
+        "click_name_to_add_note": "Clique no nome do funcionário abaixo para adicionar notas ou ver tarefas.",
+        "invalid_week_start": "Por favor, selecione uma segunda-feira como início da semana.",
+        "assign_rule": "Atribuir Regra ao Funcionário",
+        "two_consecutive_days_off": "Dois Dias Consecutivos de Folga",
+        "separated_days_off": "Dias de Folga Separados",
+        "coverage_suggestion": "Sugestão Inteligente de Cobertura",
+        "pending": "Pendente",
+    },
+}
+
+# ========== INITIAL DATA ==========
+
+DEFAULT_EMPLOYEES = [
+    {"name": "Alice", "prefs": {}, "notes": []},
+    {"name": "Bob", "prefs": {}, "notes": []},
+    {"name": "Carol", "prefs": {}, "notes": []},
+    {"name": "David", "prefs": {}, "notes": []},
+]
+
+# ========== SESSION STATE SETUP ==========
+
+def init_state():
+    if "lang" not in st.session_state:
+        st.session_state.lang = "en"
+    if "employees" not in st.session_state:
+        st.session_state.employees = DEFAULT_EMPLOYEES.copy()
+    if "notes" not in st.session_state:
+        st.session_state.notes = {e["name"]: [] for e in st.session_state.employees}
+    if "week_start" not in st.session_state:
+        st.session_state.week_start = None
+    if "schedule" not in st.session_state:
+        st.session_state.schedule = None
+    if "coverage_min" not in st.session_state:
+        st.session_state.coverage_min = {"Opening": 1, "Morning": 2, "Closing": 1}
+    if "rules" not in st.session_state:
+        # Rules like consecutive days off per employee
+        st.session_state.rules = {}
+
+# ========== UTILITIES ==========
+
+def is_monday(date):
+    return date.weekday() == 0
+
+def get_week_dates(start_date):
+    return [start_date + timedelta(days=i) for i in range(7)]
+
+def format_date(date, lang):
+    if lang == "pt":
+        return date.strftime("%d/%m")
+    else:
+        return date.strftime("%m/%d")
+
+def add_note(employee_name, text, color):
+    st.session_state.notes.setdefault(employee_name, [])
+    st.session_state.notes[employee_name].append({"text": text, "color": color})
+
+# ========== SCHEDULING LOGIC ==========
+
+def assign_shifts(employees, week_dates, coverage_min, rules):
+    # Initialize empty schedule: rows = days, cols = employees
+    schedule = []
+    day_names = [d.strftime("%A") for d in week_dates]
+
+    # For simplicity, shift assignment follows preferences & coverage, with constraints:
+    # - Assign Off on requested days off
+    # - Follow consecutive day off rules if any
+    # - Try to meet coverage_min for each shift
+
+    # Build employee preference quick lookup
+    emp_prefs = {e["name"]: e.get("prefs", {}) for e in employees}
+
+    for day_idx, day in enumerate(week_dates):
+        day_entry = {"Date": day}
+        weekday_name = day.strftime("%A")
+
+        # Track assigned per shift
+        assigned_count = {shift: 0 for shift in SHIFT_TIMES if shift != "Off"}
+
+        for emp in employees:
+            name = emp["name"]
+            prefs = emp_prefs.get(name, {})
+
+            # Check specific days off (in English)
+            specific_off = prefs.get("specific_days_off", [])
+            # Rules: consecutive days off logic check, simplified here
+            cons_off = prefs.get("consecutive_days_off", 0)
+            # We can implement better logic later for consecutive offs
+
+            # If today is a day off for this employee
+            off_days_names = specific_off
+            # Note: must normalize day names to English for logic
+            if weekday_name in off_days_names:
+                day_entry[name] = "Off"
+                continue
+
+            # Check if employee has consecutive days off rule active and assign off accordingly (simple demo)
+            if cons_off > 0:
+                # If employee has a rule for two consecutive days off, assign off accordingly
+                # For simplicity: assign off on Monday and Tuesday if cons_off == 2
+                if cons_off == 2 and day_idx in [0,1]:
+                    day_entry[name] = "Off"
+                    continue
+                # If cons_off == 1, assign off on Monday only
+                if cons_off == 1 and day_idx == 0:
+                    day_entry[name] = "Off"
+                    continue
+
+            # Preferred shift on this weekday
+            preferred_shifts = prefs.get("preferred_shifts", {})
+            shift = preferred_shifts.get(weekday_name, None)
+
+            # If no preferred shift, assign "Morning" by default
+            if not shift or shift == "":
+                shift = "Morning"
+
+            # Check coverage_min for shift: simple check to not exceed minimum (not fully optimized)
+            if assigned_count.get(shift, 0) < coverage_min.get(shift, 1):
+                day_entry[name] = shift
+                assigned_count[shift] += 1
+            else:
+                # Assign next best shift or Off if full (basic fallback)
+                # For demo, assign Off if coverage reached
+                day_entry[name] = "Off"
+
+        schedule.append(day_entry)
+
+    df = pd.DataFrame(schedule)
+    df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
+    return df
+
+# ========== UI COMPONENTS ==========
+
+def sidebar_language_selector():
+    st.sidebar.title("🌐 Language / Idioma")
+    lang = st.sidebar.radio("", options=["English", "Português"])
+    st.session_state.lang = "pt" if lang == "Português" else "en"
+
+def sidebar_week_selector():
+    st.sidebar.title("📅 " + LANG[st.session_state.lang]["week_start"])
+    week_start = st.sidebar.date_input(
+        "",
+        value=st.session_state.week_start or datetime.today(),
+        min_value=datetime.today() - timedelta(days=30),
+        max_value=datetime.today() + timedelta(days=30),
+    )
+    if not is_monday(week_start):
+        st.sidebar.error(LANG[st.session_state.lang]["invalid_week_start"])
+        return None
+    st.session_state.week_start = week_start
+    return week_start
+
+def sidebar_employee_management():
+    st.sidebar.title("👥 " + LANG[st.session_state.lang]["employees"])
+
+    employees = st.session_state.employees
+    names = [e["name"] for e in employees]
+
+    new_name = st.sidebar.text_input("Add Employee Name")
+    if st.sidebar.button("Add"):
+        if new_name and new_name not in names:
+            st.session_state.employees.append({"name": new_name, "prefs": {}, "notes": []})
+            st.experimental_rerun()
+
+    to_remove = st.sidebar.selectbox("Remove Employee", options=[""] + names)
+    if to_remove and st.sidebar.button("Remove"):
+        st.session_state.employees = [e for e in employees if e["name"] != to_remove]
+        if to_remove in st.session_state.notes:
+            del st.session_state.notes[to_remove]
+        st.experimental_rerun()
+
+def sidebar_employee_preferences():
+    st.sidebar.title("⚙️ " + LANG[st.session_state.lang]["employee_prefs"])
+    employees = st.session_state.employees
+    lang = st.session_state.lang
+
+    for emp in employees:
+        st.sidebar.subheader(emp["name"])
+
+        # Consecutive days off
+        cons_off = st.sidebar.slider(
+            LANG[lang]["consecutive_off"], 0, 2, emp.get("prefs", {}).get("consecutive_days_off", 0), key=f"cons_off_{emp['name']}"
+        )
+        # Specific days off multiselect
+        specific_off = st.sidebar.multiselect(
+            LANG[lang]["specific_days_off"],
+            options=WEEK_DAYS_EN if lang == "en" else WEEK_DAYS_PT,
+            default=emp.get("prefs", {}).get("specific_days_off", []),
+            key=f"specific_off_{emp['name']}",
+        )
+
+        # Preferred shifts per day
+        st.sidebar.markdown(LANG[lang]["preferred_shifts"])
+        preferred_shifts = {}
+        for day in (WEEK_DAYS_EN if lang == "en" else WEEK_DAYS_PT):
+            pref_shift = st.sidebar.selectbox(
+                day,
+                options=list(SHIFT_TIMES.keys()),
+                index=list(SHIFT_TIMES.keys()).index(
+                    emp.get("prefs", {}).get("preferred_shifts", {}).get(day, "Morning")
+                ),
+                key=f"pref_shift_{emp['name']}_{day}",
+            )
+            preferred_shifts[day] = pref_shift
+
+        # Save preferences back to session state
+        emp["prefs"] = {
+            "consecutive_days_off": cons_off,
+            "specific_days_off": specific_off,
+            "preferred_shifts": preferred_shifts,
+        }
+
+def sidebar_notes_panel():
+    st.sidebar.title("📝 " + LANG[st.session_state.lang]["notes"])
+
+    emp_names = [e["name"] for e in st.session_state.employees]
+    selected_emp = st.sidebar.selectbox("Select Employee", emp_names)
+
+    color_options = list(NOTE_COLORS.keys())
+    note_text = st.sidebar.text_area("Note Text")
+    note_color = st.sidebar.selectbox("Note Color", color_options)
+
+    if st.sidebar.button("Add Note"):
+        if note_text.strip():
+            add_note(selected_emp, note_text.strip(), note_color)
+            st.sidebar.success("Note added!")
+
+    # Display notes for selected employee
+    notes = st.session_state.notes.get(selected_emp, [])
+    if notes:
+        for note in notes:
+            color = NOTE_COLORS.get(note["color"], "black")
+            st.sidebar.markdown(f"<span style='color:{color}'>{note['text']}</span>", unsafe_allow_html=True)
+    else:
+        st.sidebar.write(LANG[st.session_state.lang]["no_notes"])
+
+def main():
+    st.set_page_config(page_title="Weekly Shift Scheduler", layout="wide")
+    init_state()
+
+    # Sidebar Controls
+    sidebar_language_selector()
+    week_start = sidebar_week_selector()
+    sidebar_employee_management()
+    sidebar_employee_preferences()
+    sidebar_notes_panel()
+
+    lang = st.session_state.lang
+
+    st.title(LANG[lang]["title"])
+
+    if week_start is None:
+        st.warning(LANG[lang]["invalid_week_start"])
+        return
+
+    week_dates = get_week_dates(week_start)
+
+    if st.button(LANG[lang]["generate_schedule"]):
+        df_schedule = assign_shifts(
+            st.session_state.employees, week_dates, st.session_state.coverage_min, st.session_state.rules
+        )
+        st.session_state.schedule = df_schedule
+
+    if st.session_state.schedule is not None:
+        st.subheader(LANG[lang]["schedule"])
+        st.dataframe(st.session_state.schedule.style.applymap(color_schedule_cells))
+
+        # Download CSV button
+        csv = st.session_state.schedule.to_csv(index=False).encode("utf-8")
+        st.download_button(LANG[lang]["download_csv"], csv, file_name="weekly_schedule.csv", mime="text/csv")
+
+        # Coverage report
+        st.subheader(LANG[lang]["coverage_report"])
+        report = coverage_report(st.session_state.schedule, st.session_state.coverage_min, lang)
+        st.markdown(report, unsafe_allow_html=True)
+
+        # Pending tasks panel
+        st.subheader(LANG[lang]["pending_tasks"])
+        display_pending_tasks(lang)
+
+    # Color legend for notes
+    st.sidebar.markdown("### " + LANG[lang]["color_legend"])
+    for k, v in NOTE_COLORS.items():
+        st.sidebar.markdown(f"<span style='color:{v}'>{k}</span>", unsafe_allow_html=True)
+
+    # Shift times legend
+    st.sidebar.markdown("### " + LANG[lang]["shift_times"])
+    for shift, hours in SHIFT_TIMES.items():
+        st.sidebar.markdown(f"**{shift}**: {hours}")
+
+    # Help / info section
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### " + LANG[lang]["help"])
+    st.sidebar.markdown("""
+    - Select the Monday that starts your work week.
+    - Add or remove employees as needed.
+    - Configure preferences: days off, consecutive offs, preferred shifts.
+    - Generate the schedule and review coverage.
+    - Add notes per employee for reminders or tasks.
+    """)
+
+def color_schedule_cells(val):
+    if val == "Off":
+        return "background-color: lightgray; color: black;"
+    elif val == "Morning":
+        return "background-color: #d0f0c0; color: black;"
+    elif val == "Opening":
+        return "background-color: #fceabb; color: black;"
+    elif val == "Closing":
+        return "background-color: #f4c2c2; color: black;"
+    else:
+        return ""
+
+def coverage_report(schedule_df, coverage_min, lang):
+    report_md = ""
+    shifts = list(SHIFT_TIMES.keys())
+    shifts.remove("Off")
+    total_days = schedule_df.shape[0]
+
+    for shift in shifts:
+        for day_idx in range(total_days):
+            day = schedule_df.iloc[day_idx]
+            assigned = sum(1 for s in day[1:] if s == shift)
+            min_req = coverage_min.get(shift, 1)
+            day_str = day["Date"]
+            if assigned >= min_req:
+                status = f'<span style="color:green;">{LANG[lang]["shift_coverage_ok"]}</span>'
+            else:
+                status = f'<span style="color:red;">{LANG[lang]["shift_coverage_low"]}</span>'
+            report_md += f"{day_str} - {shift}: {assigned}/{min_req} {status}<br>"
+    return report_md
+
+def display_pending_tasks(lang):
+    # Gather all notes with "Pending" status (if text contains word "pending" or "pendente")
+    pending = []
+    for emp, notes in st.session_state.notes.items():
+        for note in notes:
+            if lang == "en" and "pending" in note["text"].lower():
+                pending.append((emp, note))
+            elif lang == "pt" and "pendente" in note["text"].lower():
+                pending.append((emp, note))
+
+    if pending:
+        for emp, note in pending:
+            color = NOTE_COLORS.get(note["color"], "black")
+            st.markdown(f"- **{emp}**: <span style='color:{color}'>{note['text']}</span>", unsafe_allow_html=True)
+    else:
+        st.write(LANG[lang]["no_notes"])
+
+if __name__ == "__main__":
+    main()
